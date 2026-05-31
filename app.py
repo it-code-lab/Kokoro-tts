@@ -1,5 +1,7 @@
 from pathlib import Path
 from datetime import datetime
+import csv
+import io
 import re
 
 import gradio as gr
@@ -23,6 +25,56 @@ DEFAULT_SETTINGS = {
     "speed": 1.0,
     "split_by_paragraphs": True,
 }
+APP_CSS = """
+#excel-paste textarea {
+    font-family: Consolas, "Courier New", monospace;
+    line-height: 1.65;
+    tab-size: 18;
+    white-space: pre;
+    overflow: auto;
+    background:
+        repeating-linear-gradient(
+            to bottom,
+            #ffffff 0,
+            #ffffff 27px,
+            #f7fafc 27px,
+            #f7fafc 54px
+        );
+}
+
+#batch-table .table-wrap,
+#results-table .table-wrap {
+    border-radius: 6px;
+    border: 1px solid #d9dee8;
+}
+
+#batch-table table,
+#results-table table {
+    font-size: 13px;
+}
+
+#batch-table thead th,
+#results-table thead th {
+    background: #f3f6fb;
+    color: #1f2937;
+    font-weight: 700;
+}
+
+#batch-table tbody tr:nth-child(even),
+#results-table tbody tr:nth-child(even) {
+    background: #fafbfd;
+}
+
+#batch-table td,
+#results-table td {
+    vertical-align: top;
+}
+
+.danger-button button {
+    border-color: #dc2626 !important;
+    color: #dc2626 !important;
+}
+"""
 
 LANGUAGES = {
     "English - American": "a",
@@ -124,7 +176,11 @@ def get_pipeline(language_name: str):
         # PIPELINES[lang_code] = KPipeline(lang_code=lang_code)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Using device: {device}")
-        PIPELINES[lang_code] = KPipeline(lang_code=lang_code, device=device)
+        PIPELINES[lang_code] = KPipeline(
+            lang_code=lang_code,
+            repo_id="hexgrad/Kokoro-82M",
+            device=device,
+        )
 
     return PIPELINES[lang_code]
 
@@ -288,15 +344,87 @@ def parse_batch_rows(batch_rows):
     return rows
 
 
+def parse_excel_paste(pasted_rows: str):
+    if not pasted_rows or not pasted_rows.strip():
+        raise gr.Error("Paste at least one Excel row first.")
+
+    reader = csv.reader(io.StringIO(pasted_rows.strip()), delimiter="\t")
+    rows = []
+
+    for row in reader:
+        cells = [cell.strip() for cell in row]
+
+        if not cells or not any(cells):
+            continue
+
+        if len(rows) == 0:
+            normalized = [cell.lower().lstrip("\ufeff") for cell in cells[:2]]
+            has_text_header = normalized[0] in {"text", "script", "content"}
+            has_file_header = len(normalized) > 1 and normalized[1] in {
+                "file",
+                "filename",
+                "file name",
+                "file name (optional)",
+            }
+
+            if has_text_header and (len(normalized) == 1 or has_file_header):
+                continue
+
+        text = cells[0] if len(cells) > 0 else ""
+        requested_name = cells[1] if len(cells) > 1 else ""
+
+        if text:
+            rows.append([text, requested_name])
+
+    if not rows:
+        raise gr.Error("No text rows found in the pasted data.")
+
+    return rows
+
+
+def make_preview_choices(output_paths):
+    return [(Path(path).name, path) for path in output_paths]
+
+
+def choose_preview_audio(selected_path):
+    if selected_path and Path(selected_path).exists():
+        return selected_path
+
+    return None
+
+
+def delete_output_files():
+    deleted_count = 0
+
+    for output_path in OUTPUT_DIR.glob("*.wav"):
+        if output_path.is_file():
+            output_path.unlink()
+            deleted_count += 1
+
+    message = f"Deleted {deleted_count} WAV file{'s' if deleted_count != 1 else ''}."
+
+    return (
+        None,
+        [],
+        "",
+        [],
+        gr.update(choices=[], value=None),
+        message,
+    )
+
+
 def generate_audio(
     text: str,
     language_name: str,
+    gender: str,
     voice: str,
     speed: float,
     split_by_paragraphs: bool,
 ):
     if not text or not text.strip():
         raise gr.Error("Please paste some text first.")
+
+    voice = select_voice(language_name, gender, voice)
 
     if not voice:
         raise gr.Error("Please select a voice.")
@@ -314,12 +442,20 @@ def generate_audio(
     file_paths = [str(output_path)]
     results = [[output_path.name, str(output_path)]]
 
-    return str(output_path), file_paths, output_path.name, results
+    return (
+        str(output_path),
+        file_paths,
+        output_path.name,
+        results,
+        gr.update(choices=make_preview_choices(file_paths), value=str(output_path)),
+        "",
+    )
 
 
 def generate_batch_audio(
     batch_rows,
     language_name: str,
+    gender: str,
     voice: str,
     speed: float,
     split_by_paragraphs: bool,
@@ -329,6 +465,8 @@ def generate_batch_audio(
 
     if not rows:
         raise gr.Error("Please add at least one text row first.")
+
+    voice = select_voice(language_name, gender, voice)
 
     if not voice:
         raise gr.Error("Please select a voice.")
@@ -354,7 +492,14 @@ def generate_batch_audio(
 
     filename_list = "\n".join(Path(path).name for path in output_paths)
 
-    return output_paths[0], output_paths, filename_list, results
+    return (
+        output_paths[0],
+        output_paths,
+        filename_list,
+        results,
+        gr.update(choices=make_preview_choices(output_paths), value=output_paths[0]),
+        "",
+    )
 
 
 with gr.Blocks(title="Kokoro TTS Studio") as demo:
@@ -379,6 +524,15 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
                     generate_btn = gr.Button("Generate Audio", variant="primary")
 
                 with gr.Tab("Batch Rows"):
+                    excel_paste = gr.Textbox(
+                        label="Excel rows",
+                        placeholder="Text\tfile_name",
+                        lines=7,
+                        elem_id="excel-paste",
+                    )
+
+                    load_excel_paste_btn = gr.Button("Load to Table")
+
                     batch_input = gr.Dataframe(
                         headers=["Text", "File name (optional)"],
                         datatype=["str", "str"],
@@ -387,9 +541,12 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
                         column_count=2,
                         label="Batch texts",
                         interactive=True,
-                        wrap=True,
+                        wrap=False,
                         line_breaks=True,
+                        max_height=320,
+                        column_widths=["72%", "28%"],
                         buttons=["copy"],
+                        elem_id="batch-table",
                     )
 
                     generate_batch_btn = gr.Button("Generate Files", variant="primary")
@@ -413,6 +570,7 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
                         label="Voice",
                         choices=VOICES_BY_LANGUAGE[DEFAULT_SETTINGS["language"]],
                         value=DEFAULT_SETTINGS["voice"],
+                        allow_custom_value=True,
                     )
 
                     speed = gr.Slider(
@@ -434,6 +592,13 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
                 type="filepath",
             )
 
+            preview_selector = gr.Dropdown(
+                label="Preview generated file",
+                choices=[],
+                value=None,
+                interactive=True,
+            )
+
             file_output = gr.File(
                 label="Download WAV files",
                 file_count="multiple",
@@ -452,9 +617,20 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
                 type="array",
                 label="Generated files",
                 interactive=False,
-                wrap=True,
+                wrap=False,
+                max_height=260,
+                column_widths=["66%", "34%"],
                 buttons=["copy"],
+                elem_id="results-table",
             )
+
+            delete_files_btn = gr.Button(
+                "Delete Previous WAV Files",
+                variant="secondary",
+                elem_classes=["danger-button"],
+            )
+
+            cleanup_status = gr.Markdown()
 
     demo.load(
         fn=load_settings,
@@ -511,11 +687,36 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
             outputs=settings_state,
         )
 
+    load_excel_paste_btn.click(
+        fn=parse_excel_paste,
+        inputs=excel_paste,
+        outputs=batch_input,
+    )
+
+    preview_selector.change(
+        fn=choose_preview_audio,
+        inputs=preview_selector,
+        outputs=audio_output,
+    )
+
+    delete_files_btn.click(
+        fn=delete_output_files,
+        outputs=[
+            audio_output,
+            file_output,
+            generated_names,
+            generation_results,
+            preview_selector,
+            cleanup_status,
+        ],
+    )
+
     generate_btn.click(
         fn=generate_audio,
         inputs=[
             text_input,
             language,
+            gender,
             voice,
             speed,
             split_by_paragraphs,
@@ -525,6 +726,8 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
             file_output,
             generated_names,
             generation_results,
+            preview_selector,
+            cleanup_status,
         ],
     )
 
@@ -533,6 +736,7 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
         inputs=[
             batch_input,
             language,
+            gender,
             voice,
             speed,
             split_by_paragraphs,
@@ -542,6 +746,8 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
             file_output,
             generated_names,
             generation_results,
+            preview_selector,
+            cleanup_status,
         ],
     )
 
@@ -551,4 +757,5 @@ if __name__ == "__main__":
         server_name="127.0.0.1",
         server_port=7860,
         inbrowser=True,
+        css=APP_CSS,
     )
