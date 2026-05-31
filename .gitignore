@@ -1,0 +1,95 @@
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python build/distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+pip-wheel-metadata/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Test/cache folders
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Gradio temporary/share/cache files
+.gradio/
+flagged/
+flagged_data/
+
+# Generated audio outputs
+outputs/
+output/
+generated/
+exports/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.aac
+
+# Large model/checkpoint files
+models/
+checkpoints/
+weights/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.ckpt
+
+# Logs
+logs/
+*.log
+
+# Environment/config secrets
+.env
+.env.*
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node/front-end files, if UI is extended later
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.old
