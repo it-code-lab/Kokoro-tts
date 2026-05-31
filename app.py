@@ -5,6 +5,7 @@ import gradio as gr
 import numpy as np
 import soundfile as sf
 from kokoro import KPipeline
+import torch
 
 
 OUTPUT_DIR = Path("outputs")
@@ -83,7 +84,10 @@ def get_pipeline(language_name: str):
     lang_code = LANGUAGES[language_name]
 
     if lang_code not in PIPELINES:
-        PIPELINES[lang_code] = KPipeline(lang_code=lang_code)
+        # PIPELINES[lang_code] = KPipeline(lang_code=lang_code)
+        DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Using device: {DEVICE}")
+        PIPELINES[lang_code] = KPipeline(lang_code=lang_code, device=DEVICE)
 
     return PIPELINES[lang_code]
 
