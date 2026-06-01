@@ -24,6 +24,9 @@ DEFAULT_SETTINGS = {
     "voice": "af_heart",
     "speed": 1.0,
     "split_by_paragraphs": True,
+    "add_sentence_pauses": True,
+    "sentence_pause_ms": 250,
+    "paragraph_pause_ms": 550,
 }
 APP_CSS = """
 #excel-paste textarea {
@@ -209,6 +212,31 @@ def normalize_settings(settings):
     split_by_paragraphs = bool(
         merged.get("split_by_paragraphs", DEFAULT_SETTINGS["split_by_paragraphs"])
     )
+    add_sentence_pauses = bool(
+        merged.get("add_sentence_pauses", DEFAULT_SETTINGS["add_sentence_pauses"])
+    )
+
+    sentence_pause_ms = merged.get(
+        "sentence_pause_ms",
+        DEFAULT_SETTINGS["sentence_pause_ms"],
+    )
+    paragraph_pause_ms = merged.get(
+        "paragraph_pause_ms",
+        DEFAULT_SETTINGS["paragraph_pause_ms"],
+    )
+
+    try:
+        sentence_pause_ms = int(sentence_pause_ms)
+    except (TypeError, ValueError):
+        sentence_pause_ms = DEFAULT_SETTINGS["sentence_pause_ms"]
+
+    try:
+        paragraph_pause_ms = int(paragraph_pause_ms)
+    except (TypeError, ValueError):
+        paragraph_pause_ms = DEFAULT_SETTINGS["paragraph_pause_ms"]
+
+    sentence_pause_ms = min(1200, max(0, sentence_pause_ms))
+    paragraph_pause_ms = min(2000, max(0, paragraph_pause_ms))
 
     voice = select_voice(language_name, gender, merged.get("voice"))
 
@@ -218,6 +246,9 @@ def normalize_settings(settings):
         "voice": voice,
         "speed": speed,
         "split_by_paragraphs": split_by_paragraphs,
+        "add_sentence_pauses": add_sentence_pauses,
+        "sentence_pause_ms": sentence_pause_ms,
+        "paragraph_pause_ms": paragraph_pause_ms,
     }
 
 
@@ -231,10 +262,22 @@ def load_settings(settings):
         gr.update(choices=voices, value=settings["voice"]),
         settings["speed"],
         settings["split_by_paragraphs"],
+        settings["add_sentence_pauses"],
+        settings["sentence_pause_ms"],
+        settings["paragraph_pause_ms"],
     )
 
 
-def save_settings(language_name, gender, voice, speed, split_by_paragraphs):
+def save_settings(
+    language_name,
+    gender,
+    voice,
+    speed,
+    split_by_paragraphs,
+    add_sentence_pauses,
+    sentence_pause_ms,
+    paragraph_pause_ms,
+):
     return normalize_settings(
         {
             "language": language_name,
@@ -242,11 +285,23 @@ def save_settings(language_name, gender, voice, speed, split_by_paragraphs):
             "voice": voice,
             "speed": speed,
             "split_by_paragraphs": split_by_paragraphs,
+            "add_sentence_pauses": add_sentence_pauses,
+            "sentence_pause_ms": sentence_pause_ms,
+            "paragraph_pause_ms": paragraph_pause_ms,
         }
     )
 
 
-def update_voice_choices(language_name, gender, current_voice, speed, split_by_paragraphs):
+def update_voice_choices(
+    language_name,
+    gender,
+    current_voice,
+    speed,
+    split_by_paragraphs,
+    add_sentence_pauses,
+    sentence_pause_ms,
+    paragraph_pause_ms,
+):
     selected_voice = select_voice(language_name, gender, current_voice)
     voices = get_voice_choices(language_name, gender)
     settings = save_settings(
@@ -255,6 +310,9 @@ def update_voice_choices(language_name, gender, current_voice, speed, split_by_p
         selected_voice,
         speed,
         split_by_paragraphs,
+        add_sentence_pauses,
+        sentence_pause_ms,
+        paragraph_pause_ms,
     )
 
     return gr.update(choices=voices, value=selected_voice), settings
@@ -284,28 +342,107 @@ def make_output_path(language_name: str, voice: str, index: int, requested_name=
     return output_path
 
 
+def sentence_segments(text: str) -> list[str]:
+    pieces = re.split(r'([.!?;:।॥]+["\'”’)]*)', text)
+    segments = []
+    current = ""
+
+    for piece in pieces:
+        if not piece:
+            continue
+
+        current += piece
+
+        if re.fullmatch(r'[.!?;:।॥]+["\'”’)]*', piece):
+            segment = current.strip()
+            if segment:
+                segments.append(segment)
+            current = ""
+
+    remainder = current.strip()
+    if remainder:
+        segments.append(remainder)
+
+    return segments
+
+
+def text_segments_with_pauses(
+    text: str,
+    split_by_paragraphs: bool,
+    add_sentence_pauses: bool,
+    sentence_pause_ms: int,
+    paragraph_pause_ms: int,
+):
+    normalized_text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    pieces = re.split(r"(\n+)", normalized_text)
+    segments = []
+
+    for piece in pieces:
+        if not piece:
+            continue
+
+        if piece.startswith("\n"):
+            if split_by_paragraphs and segments:
+                last_text, last_pause_ms = segments[-1]
+                segments[-1] = (last_text, max(last_pause_ms, paragraph_pause_ms))
+            continue
+
+        text_pieces = sentence_segments(piece) if add_sentence_pauses else [piece.strip()]
+
+        for index, text_piece in enumerate(text_pieces):
+            if not text_piece:
+                continue
+
+            pause_ms = (
+                sentence_pause_ms
+                if add_sentence_pauses and index < len(text_pieces) - 1
+                else 0
+            )
+            segments.append((text_piece, pause_ms))
+
+    if segments:
+        last_text, _ = segments[-1]
+        segments[-1] = (last_text, 0)
+
+    return segments
+
+
 def synthesize_to_file(
     text: str,
     language_name: str,
     voice: str,
     speed: float,
     split_by_paragraphs: bool,
+    add_sentence_pauses: bool,
+    sentence_pause_ms: int,
+    paragraph_pause_ms: int,
     output_path: Path,
 ):
     pipeline = get_pipeline(language_name)
-    split_pattern = r"\n+" if split_by_paragraphs else None
-
-    generator = pipeline(
-        text.strip(),
-        voice=voice,
-        speed=speed,
-        split_pattern=split_pattern,
+    segments = text_segments_with_pauses(
+        text,
+        split_by_paragraphs,
+        add_sentence_pauses,
+        sentence_pause_ms,
+        paragraph_pause_ms,
     )
 
     audio_chunks = []
 
-    for _, _, audio in generator:
-        audio_chunks.append(audio)
+    for segment_text, pause_ms in segments:
+        generator = pipeline(
+            segment_text,
+            voice=voice,
+            speed=speed,
+            split_pattern=None,
+        )
+
+        for _, _, audio in generator:
+            audio_chunks.append(audio)
+
+        if pause_ms > 0:
+            silence_samples = int(SAMPLE_RATE * pause_ms / 1000)
+            audio_chunks.append(np.zeros(silence_samples, dtype=np.float32))
 
     if not audio_chunks:
         raise gr.Error("No audio was generated. Try shorter text or a different voice.")
@@ -420,6 +557,9 @@ def generate_audio(
     voice: str,
     speed: float,
     split_by_paragraphs: bool,
+    add_sentence_pauses: bool,
+    sentence_pause_ms: int,
+    paragraph_pause_ms: int,
 ):
     if not text or not text.strip():
         raise gr.Error("Please paste some text first.")
@@ -436,6 +576,9 @@ def generate_audio(
         voice,
         speed,
         split_by_paragraphs,
+        add_sentence_pauses,
+        sentence_pause_ms,
+        paragraph_pause_ms,
         output_path,
     )
 
@@ -459,6 +602,9 @@ def generate_batch_audio(
     voice: str,
     speed: float,
     split_by_paragraphs: bool,
+    add_sentence_pauses: bool,
+    sentence_pause_ms: int,
+    paragraph_pause_ms: int,
     progress=gr.Progress(),
 ):
     rows = parse_batch_rows(batch_rows)
@@ -485,6 +631,9 @@ def generate_batch_audio(
             voice,
             speed,
             split_by_paragraphs,
+            add_sentence_pauses,
+            sentence_pause_ms,
+            paragraph_pause_ms,
             output_path,
         )
         output_paths.append(str(output_path))
@@ -582,9 +731,31 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
                     )
 
                     split_by_paragraphs = gr.Checkbox(
-                        label="Split by paragraphs",
+                        label="Pause on line breaks",
                         value=DEFAULT_SETTINGS["split_by_paragraphs"],
                     )
+
+                    add_sentence_pauses = gr.Checkbox(
+                        label="Pause after sentences",
+                        value=DEFAULT_SETTINGS["add_sentence_pauses"],
+                    )
+
+                    with gr.Row():
+                        sentence_pause_ms = gr.Slider(
+                            label="Sentence pause (ms)",
+                            minimum=0,
+                            maximum=1200,
+                            value=DEFAULT_SETTINGS["sentence_pause_ms"],
+                            step=25,
+                        )
+
+                        paragraph_pause_ms = gr.Slider(
+                            label="Line break pause (ms)",
+                            minimum=0,
+                            maximum=2000,
+                            value=DEFAULT_SETTINGS["paragraph_pause_ms"],
+                            step=50,
+                        )
 
         with gr.Column(scale=1):
             audio_output = gr.Audio(
@@ -641,6 +812,9 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
             voice,
             speed,
             split_by_paragraphs,
+            add_sentence_pauses,
+            sentence_pause_ms,
+            paragraph_pause_ms,
         ],
     )
 
@@ -652,6 +826,9 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
             voice,
             speed,
             split_by_paragraphs,
+            add_sentence_pauses,
+            sentence_pause_ms,
+            paragraph_pause_ms,
         ],
         outputs=[
             voice,
@@ -667,6 +844,9 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
             voice,
             speed,
             split_by_paragraphs,
+            add_sentence_pauses,
+            sentence_pause_ms,
+            paragraph_pause_ms,
         ],
         outputs=[
             voice,
@@ -674,7 +854,14 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
         ],
     )
 
-    for component in (voice, speed, split_by_paragraphs):
+    for component in (
+        voice,
+        speed,
+        split_by_paragraphs,
+        add_sentence_pauses,
+        sentence_pause_ms,
+        paragraph_pause_ms,
+    ):
         component.change(
             fn=save_settings,
             inputs=[
@@ -683,6 +870,9 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
                 voice,
                 speed,
                 split_by_paragraphs,
+                add_sentence_pauses,
+                sentence_pause_ms,
+                paragraph_pause_ms,
             ],
             outputs=settings_state,
         )
@@ -720,6 +910,9 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
             voice,
             speed,
             split_by_paragraphs,
+            add_sentence_pauses,
+            sentence_pause_ms,
+            paragraph_pause_ms,
         ],
         outputs=[
             audio_output,
@@ -740,6 +933,9 @@ with gr.Blocks(title="Kokoro TTS Studio") as demo:
             voice,
             speed,
             split_by_paragraphs,
+            add_sentence_pauses,
+            sentence_pause_ms,
+            paragraph_pause_ms,
         ],
         outputs=[
             audio_output,
